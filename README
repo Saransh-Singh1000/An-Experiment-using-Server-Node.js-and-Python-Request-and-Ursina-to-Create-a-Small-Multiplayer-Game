@@ -16,7 +16,6 @@ Each player is represented by a colored cube in a shared 3D space. The server as
 - ✅ Unique server-assigned player identity
 - ✅ No duplicate cubes or ghost players
 - ✅ Toggle mouse lock with `ESC`
-- ✅ Server-side `/clear` route to reset all players
 - ✅ Clean threading and error handling
 
 ---
