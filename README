@@ -21,10 +21,3 @@ Each player is represented by a colored cube in a shared 3D space. The server as
 
 ---
 
-## 🛠 Setup Instructions
-
-### 1. Clone or Download the Project
-
-```bash
-git clone https://github.com/your-username/symbolic-multiplayer-game
-cd symbolic-multiplayer-game
