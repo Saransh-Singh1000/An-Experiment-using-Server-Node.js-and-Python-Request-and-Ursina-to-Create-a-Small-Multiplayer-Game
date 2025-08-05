@@ -1,0 +1,30 @@
+# 🧠 Symbolic Multiplayer Game Experiment
+
+This project is a minimalist multiplayer game prototype built using:
+
+- 🐍 **Python** with [Ursina Engine](https://www.ursinaengine.org/) for 3D rendering
+- 🟢 **Node.js** for lightweight server-side coordination
+- 🌐 **HTTP-based communication** for player position syncing
+
+Each player is represented by a colored cube in a shared 3D space. The server assigns unique IDs to each client, ensuring glitch-free multiplayer rendering.
+
+---
+
+## 🎮 Features
+
+- ✅ Real-time player movement sync
+- ✅ Unique server-assigned player identity
+- ✅ No duplicate cubes or ghost players
+- ✅ Toggle mouse lock with `ESC`
+- ✅ Server-side `/clear` route to reset all players
+- ✅ Clean threading and error handling
+
+---
+
+## 🛠 Setup Instructions
+
+### 1. Clone or Download the Project
+
+```bash
+git clone https://github.com/your-username/symbolic-multiplayer-game
+cd symbolic-multiplayer-game
