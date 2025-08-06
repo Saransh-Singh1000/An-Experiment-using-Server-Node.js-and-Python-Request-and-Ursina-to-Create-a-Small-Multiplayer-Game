@@ -59,7 +59,7 @@ def fetch_players():
 # Ursina Game
 app = Ursina()
 player = FirstPersonController()
-player.gravity = 0
+player.gravity = 1 # Enables Gravity and Jumps
 
 Sky()
 ground = Entity(model='plane', scale=100, texture='white_cube', texture_scale=(100,100), collider='box', color=color.green)
