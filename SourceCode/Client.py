@@ -11,7 +11,7 @@ from ursina.prefabs.first_person_controller import FirstPersonController
 import requests, threading, time, socket
 
 SERVER_URL = 'http://localhost:3000'
-PLAYER_UPDATE_INTERVAL = 1.0
+PLAYER_UPDATE_INTERVAL = 0.0
 other_players = {}
 
 # Get local IP for unique ID
