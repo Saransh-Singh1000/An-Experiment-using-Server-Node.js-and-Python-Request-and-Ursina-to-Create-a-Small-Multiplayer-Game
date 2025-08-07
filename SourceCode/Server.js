@@ -5,29 +5,40 @@
 
 
 
-
-
-
-
 // Server.js
 const http = require('http');
+const PORT = 3000;
 
 let players = {};
 
+// Clean up disconnected players every 5 seconds
+setInterval(() => {
+  const now = Date.now();
+  for (const id in players) {
+    if (now - players[id].time > 5000) {
+      delete players[id];
+    }
+  }
+}, 1000);
+
 const server = http.createServer((req, res) => {
-  const ip = req.socket.remoteAddress.replace(/^.*:/, ''); // Extract IPv4
   if (req.method === 'POST') {
     let body = '';
     req.on('data', chunk => (body += chunk));
     req.on('end', () => {
       try {
         const data = JSON.parse(body);
-        players[ip] = {
+
+        // ✅ Use client-sent ID (IP or UUID)
+        const id = typeof data.id === 'string' ? data.id : req.socket.remoteAddress.replace(/^.*:/, '');
+
+        players[id] = {
           x: data.x,
           y: data.y,
           z: data.z,
           time: Date.now()
         };
+
         res.writeHead(200);
         res.end('Position Updated');
       } catch (e) {
@@ -36,15 +47,12 @@ const server = http.createServer((req, res) => {
       }
     });
   } else if (req.method === 'GET') {
-    
-   
-
     const result = {};
-    for (const ip in players) {
-      result[ip] = {
-        x: players[ip].x,
-        y: players[ip].y,
-        z: players[ip].z
+    for (const id in players) {
+      result[id] = {
+        x: players[id].x,
+        y: players[id].y,
+        z: players[id].z
       };
     }
 
@@ -56,7 +64,6 @@ const server = http.createServer((req, res) => {
   }
 });
 
-const PORT = 3000;
 server.listen(PORT, () => {
   console.log(`🟢 Server running at http://localhost:${PORT}`);
 });
