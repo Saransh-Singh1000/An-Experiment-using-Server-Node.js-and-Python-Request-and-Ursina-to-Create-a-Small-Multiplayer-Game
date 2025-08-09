@@ -1,10 +1,5 @@
 
 
-
-
-
-
-
 from ursina import *
 from ursina.prefabs.first_person_controller import FirstPersonController
 import requests, threading, time, uuid, math
@@ -139,12 +134,29 @@ chunk_boxes = {}
 def chunk_key(x, z):
     return (math.floor(x / CHUNK_SIZE), math.floor(z / CHUNK_SIZE))
 
-# === SPAWN RANDOM RECTANGULAR BOXES IN CHUNK ===
-def spawn_random_boxes_in_chunk(cx, cz, count=5):
+# === SPAWN RANDOM RECTANGULAR BOXES IN CHUNK WITH SPACING ===
+def spawn_random_boxes_in_chunk(cx, cz, count=5, min_distance=5):
     boxes = []
+    positions = []
+
     for _ in range(count):
-        x = uniform(cx * CHUNK_SIZE, (cx + 1) * CHUNK_SIZE)
-        z = uniform(cz * CHUNK_SIZE, (cz + 1) * CHUNK_SIZE)
+        tries = 0
+        max_tries = 30
+        while True:
+            x = uniform(cx * CHUNK_SIZE, (cx + 1) * CHUNK_SIZE)
+            z = uniform(cz * CHUNK_SIZE, (cz + 1) * CHUNK_SIZE)
+            # Check distance with all existing boxes
+            too_close = False
+            for px, pz in positions:
+                dist = math.sqrt((x - px)**2 + (z - pz)**2)
+                if dist < min_distance:
+                    too_close = True
+                    break
+            if not too_close or tries >= max_tries:
+                positions.append((x, z))
+                break
+            tries += 1
+
         y = 0.5  # Slightly above ground
 
         box = Entity(
@@ -155,7 +167,9 @@ def spawn_random_boxes_in_chunk(cx, cz, count=5):
             collider='box',
             color=color.white
         )
+        box.surface_type = 'metal'  # Mark as metal surface
         boxes.append(box)
+
     return boxes
 
 # === CHUNK CREATION WITH BOXES ===
@@ -171,6 +185,7 @@ def create_chunk(cx, cz):
         collider='box',
         color=color.green
     )
+    chunk.surface_type = 'grass'  # Mark ground surface type
     chunk_boxes[(cx, cz)] = spawn_random_boxes_in_chunk(cx, cz)
     return chunk
 
@@ -183,7 +198,7 @@ def update_chunks():
                 active_chunks[key] = create_chunk(*key)
 
     to_remove = []
-    for key in active_chunks:
+    for key in list(active_chunks.keys()):
         if abs(key[0] - cx) > VIEW_RADIUS + 1 or abs(key[1] - cz) > VIEW_RADIUS + 1:
             to_remove.append(key)
 
@@ -197,11 +212,55 @@ def update_chunks():
                 destroy(box)
             del chunk_boxes[key]
 
-# === VERTICAL CAMERA MOVEMENT + CHUNK UPDATE ===
+# === SOUND SETUP ===
+grass_sound = Audio('Assets/WalkingOnGrass.mp3', loop=True, autoplay=False, volume=1)
+metal_sound = Audio('Assets/WalkingOnMetal.mp3', loop=True, autoplay=False, volume=1)
+current_surface = None
+
+# === VERTICAL CAMERA MOVEMENT + CHUNK UPDATE + SURFACE SOUND ===
 def update():
+    global current_surface
+
     camera.rotation_x -= mouse.velocity[1] * 40
     camera.rotation_x = clamp(camera.rotation_x, -90, 90)
     update_chunks()
+
+    # Detect surface type under player using surface_type attribute
+    hit_info = raycast(player.world_position + Vec3(0, 0.5, 0), Vec3(0, -1, 0), distance=2, ignore=(player,))
+    surface_type = None
+    if hit_info.hit and hasattr(hit_info.entity, 'surface_type'):
+        surface_type = hit_info.entity.surface_type
+
+    # Determine if moving on ground
+    is_moving = (held_keys['w'] or held_keys['a'] or held_keys['s'] or held_keys['d']) and player.grounded
+    if is_moving:
+        if surface_type != current_surface:
+            # Stop old sound
+            if grass_sound.playing:
+                grass_sound.stop()
+            if metal_sound.playing:
+                metal_sound.stop()
+
+            # Play new sound
+            if surface_type == 'grass':
+                grass_sound.play()
+            elif surface_type == 'metal':
+                metal_sound.play()
+
+            current_surface = surface_type
+        else:
+            # If same surface, but sound not playing, play again
+            if surface_type == 'grass' and not grass_sound.playing:
+                grass_sound.play()
+            elif surface_type == 'metal' and not metal_sound.playing:
+                metal_sound.play()
+    else:
+        # Stop all sounds if not moving
+        if grass_sound.playing:
+            grass_sound.stop()
+        if metal_sound.playing:
+            metal_sound.stop()
+        current_surface = None
 
 Sky()
 update_chunks()
