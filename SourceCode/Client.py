@@ -1,6 +1,12 @@
 
 
 
+
+
+
+
+
+
 from ursina import *
 from ursina.prefabs.first_person_controller import FirstPersonController
 import requests, threading, time, uuid, math
@@ -100,7 +106,7 @@ chunk_boxes = {}  # Containers per chunk: {(cx, cz): [Entity, ...]}
 def chunk_key(x, z):
     return (math.floor(x / CHUNK_SIZE), math.floor(z / CHUNK_SIZE))
 
-# === LOAD CONTAINERS FROM SERVER ===
+# === LOAD CONTAINERS WITH CULLING ===
 def fetch_containers():
     global chunk_boxes
     while True:
@@ -108,11 +114,21 @@ def fetch_containers():
             res = requests.get(f'{SERVER_URL}/containers')
             data = res.json()  # { "cx,cz": [ {x,y,z}, ... ] }
 
-            # For each chunk, place containers if not already present
+            cx, cz = chunk_key(player.x, player.z)
+            visible_chunks = {
+                (cx + dx, cz + dz)
+                for dx in range(-VIEW_RADIUS, VIEW_RADIUS + 1)
+                for dz in range(-VIEW_RADIUS, VIEW_RADIUS + 1)
+            }
+
+            # Place containers only for visible chunks
             for key, positions in data.items():
-                cx, cz = map(int, key.split(','))
-                if (cx, cz) not in chunk_boxes:
-                    chunk_boxes[(cx, cz)] = []
+                chunk_coords = tuple(map(int, key.split(',')))
+                if chunk_coords not in visible_chunks:
+                    continue
+
+                if chunk_coords not in chunk_boxes:
+                    chunk_boxes[chunk_coords] = []
                     for pos in positions:
                         box = Entity(
                             model='cube',
@@ -123,17 +139,14 @@ def fetch_containers():
                             color=color.white
                         )
                         box.surface_type = 'metal'
-                        chunk_boxes[(cx, cz)].append(box)
+                        chunk_boxes[chunk_coords].append(box)
 
-            # Remove container entities for chunks no longer sent by server
-            keys_to_remove = []
+            # Remove container entities for chunks outside visible range
             for ck in list(chunk_boxes.keys()):
-                if f"{ck[0]},{ck[1]}" not in data:
+                if ck not in visible_chunks:
                     for box in chunk_boxes[ck]:
                         destroy(box)
-                    keys_to_remove.append(ck)
-            for k in keys_to_remove:
-                del chunk_boxes[k]
+                    del chunk_boxes[ck]
 
         except Exception as e:
             print('Container Fetch Error:', e)
@@ -186,23 +199,20 @@ def update():
     camera.rotation_x = clamp(camera.rotation_x, -90, 90)
     update_chunks()
 
-    # Detect surface type under player using surface_type attribute
+    # Detect surface type under player
     hit_info = raycast(player.world_position + Vec3(0, 0.5, 0), Vec3(0, -1, 0), distance=2, ignore=(player,))
     surface_type = None
     if hit_info.hit and hasattr(hit_info.entity, 'surface_type'):
         surface_type = hit_info.entity.surface_type
 
-    # Determine if moving on ground
     is_moving = (held_keys['w'] or held_keys['a'] or held_keys['s'] or held_keys['d']) and player.grounded
     if is_moving:
         if surface_type != current_surface:
-            # Stop old sound
             if grass_sound.playing:
                 grass_sound.stop()
             if metal_sound.playing:
                 metal_sound.stop()
 
-            # Play new sound
             if surface_type == 'grass':
                 grass_sound.play()
             elif surface_type == 'metal':
@@ -210,25 +220,22 @@ def update():
 
             current_surface = surface_type
         else:
-            # If same surface, but sound not playing, play again
             if surface_type == 'grass' and not grass_sound.playing:
                 grass_sound.play()
             elif surface_type == 'metal' and not metal_sound.playing:
                 metal_sound.play()
     else:
-        # Stop all sounds if not moving
         if grass_sound.playing:
             grass_sound.stop()
         if metal_sound.playing:
             metal_sound.stop()
         current_surface = None
 
-# Calculate model height and scale
+# === PLAYER SETUP ===
 raw_model_height = get_model_height(PLAYER_MODEL_PATH)
 player_scale = 1.0
 scaled_height = raw_model_height * player_scale
 
-# Local player controller
 player = FirstPersonController(
     position=(0, scaled_height / 2 + 0.1, 0),
     collider='box',
@@ -236,7 +243,6 @@ player = FirstPersonController(
 player.gravity = 1
 player.height = scaled_height
 
-# Attach visual model manually
 player_model = Entity(
     parent=player,
     model=PLAYER_MODEL_PATH,
@@ -246,12 +252,10 @@ player_model = Entity(
     double_sided=True
 )
 
-# Camera setup using scaled height
 camera.parent = player
 camera.position = (0, scaled_height + 0.2, 0)
 camera.rotation = (0, 0, 0)
 
-# ESC toggles mouse lock
 mouse_locked = True
 mouse.locked = True
 
