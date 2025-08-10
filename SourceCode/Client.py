@@ -1,9 +1,9 @@
 
 
+
 from ursina import *
 from ursina.prefabs.first_person_controller import FirstPersonController
 import requests, threading, time, uuid, math
-from random import uniform
 
 # === CONFIG ===
 SERVER_URL = 'http://localhost:3000'
@@ -15,6 +15,9 @@ BOX_TEXTURE_PATH = 'Assets/SteelCountainer.png'
 CHUNK_SIZE = 50
 VIEW_RADIUS = 2
 
+# === URSINA GAME ===
+app = Ursina()  # Must be created BEFORE any Entity or Audio!
+
 # === UNIQUE PLAYER ID ===
 my_id = str(uuid.uuid4())
 other_players = {}
@@ -25,6 +28,11 @@ def get_model_height(path):
     height = temp.bounds.size.y
     destroy(temp)
     return height
+
+# === SOUND SETUP ===
+grass_sound = Audio('Assets/WalkingOnGrass.mp3', loop=True, autoplay=False, volume=1)
+metal_sound = Audio('Assets/WalkingOnMetal.mp3', loop=True, autoplay=False, volume=1)
+current_surface = None
 
 # === NETWORK: SEND POSITION ===
 def update_position():
@@ -85,94 +93,53 @@ def fetch_players():
             print('Fetch Error:', e)
         time.sleep(PLAYER_UPDATE_INTERVAL)
 
-# === URSINA GAME ===
-app = Ursina()
-
-# Calculate model height and scale
-raw_model_height = get_model_height(PLAYER_MODEL_PATH)
-player_scale = 1.0
-scaled_height = raw_model_height * player_scale
-
-# Local player controller
-player = FirstPersonController(
-    position=(0, scaled_height / 2 + 0.1, 0),
-    collider='box',
-)
-player.gravity = 1
-player.height = scaled_height
-
-# Attach visual model manually
-player_model = Entity(
-    parent=player,
-    model=PLAYER_MODEL_PATH,
-    texture=PLAYER_TEXTURE_PATH,
-    scale=player_scale,
-    position=(0, 0, 0),
-    double_sided=True
-)
-
-# Camera setup using scaled height
-camera.parent = player
-camera.position = (0, scaled_height + 0.2, 0)
-camera.rotation = (0, 0, 0)
-
-# ESC toggles mouse lock
-mouse_locked = True
-mouse.locked = True
-
-def input(key):
-    global mouse_locked
-    if key == 'escape':
-        mouse_locked = not mouse_locked
-        mouse.locked = mouse_locked
-        mouse.visible = not mouse_locked
-
 # === CHUNK SYSTEM ===
 active_chunks = {}
-chunk_boxes = {}
+chunk_boxes = {}  # Containers per chunk: {(cx, cz): [Entity, ...]}
 
 def chunk_key(x, z):
     return (math.floor(x / CHUNK_SIZE), math.floor(z / CHUNK_SIZE))
 
-# === SPAWN RANDOM RECTANGULAR BOXES IN CHUNK WITH SPACING ===
-def spawn_random_boxes_in_chunk(cx, cz, count=5, min_distance=5):
-    boxes = []
-    positions = []
+# === LOAD CONTAINERS FROM SERVER ===
+def fetch_containers():
+    global chunk_boxes
+    while True:
+        try:
+            res = requests.get(f'{SERVER_URL}/containers')
+            data = res.json()  # { "cx,cz": [ {x,y,z}, ... ] }
 
-    for _ in range(count):
-        tries = 0
-        max_tries = 30
-        while True:
-            x = uniform(cx * CHUNK_SIZE, (cx + 1) * CHUNK_SIZE)
-            z = uniform(cz * CHUNK_SIZE, (cz + 1) * CHUNK_SIZE)
-            # Check distance with all existing boxes
-            too_close = False
-            for px, pz in positions:
-                dist = math.sqrt((x - px)**2 + (z - pz)**2)
-                if dist < min_distance:
-                    too_close = True
-                    break
-            if not too_close or tries >= max_tries:
-                positions.append((x, z))
-                break
-            tries += 1
+            # For each chunk, place containers if not already present
+            for key, positions in data.items():
+                cx, cz = map(int, key.split(','))
+                if (cx, cz) not in chunk_boxes:
+                    chunk_boxes[(cx, cz)] = []
+                    for pos in positions:
+                        box = Entity(
+                            model='cube',
+                            texture=BOX_TEXTURE_PATH,
+                            scale=(4, 2, 3),
+                            position=(pos['x'], pos['y'], pos['z']),
+                            collider='box',
+                            color=color.white
+                        )
+                        box.surface_type = 'metal'
+                        chunk_boxes[(cx, cz)].append(box)
 
-        y = 0.5  # Slightly above ground
+            # Remove container entities for chunks no longer sent by server
+            keys_to_remove = []
+            for ck in list(chunk_boxes.keys()):
+                if f"{ck[0]},{ck[1]}" not in data:
+                    for box in chunk_boxes[ck]:
+                        destroy(box)
+                    keys_to_remove.append(ck)
+            for k in keys_to_remove:
+                del chunk_boxes[k]
 
-        box = Entity(
-            model='cube',
-            texture=BOX_TEXTURE_PATH,
-            scale=(4, 2, 3),  # Rectangular shape
-            position=(x, y, z),
-            collider='box',
-            color=color.white
-        )
-        box.surface_type = 'metal'  # Mark as metal surface
-        boxes.append(box)
+        except Exception as e:
+            print('Container Fetch Error:', e)
+        time.sleep(5)  # fetch every 5 seconds
 
-    return boxes
-
-# === CHUNK CREATION WITH BOXES ===
+# === CHUNK CREATION WITHOUT CONTAINERS ===
 def create_chunk(cx, cz):
     world_x = cx * CHUNK_SIZE
     world_z = cz * CHUNK_SIZE
@@ -185,8 +152,7 @@ def create_chunk(cx, cz):
         collider='box',
         color=color.green
     )
-    chunk.surface_type = 'grass'  # Mark ground surface type
-    chunk_boxes[(cx, cz)] = spawn_random_boxes_in_chunk(cx, cz)
+    chunk.surface_type = 'grass'
     return chunk
 
 def update_chunks():
@@ -206,16 +172,11 @@ def update_chunks():
         destroy(active_chunks[key])
         del active_chunks[key]
 
-        # Unload boxes
+        # Unload containers for this chunk
         if key in chunk_boxes:
             for box in chunk_boxes[key]:
                 destroy(box)
             del chunk_boxes[key]
-
-# === SOUND SETUP ===
-grass_sound = Audio('Assets/WalkingOnGrass.mp3', loop=True, autoplay=False, volume=1)
-metal_sound = Audio('Assets/WalkingOnMetal.mp3', loop=True, autoplay=False, volume=1)
-current_surface = None
 
 # === VERTICAL CAMERA MOVEMENT + CHUNK UPDATE + SURFACE SOUND ===
 def update():
@@ -262,10 +223,50 @@ def update():
             metal_sound.stop()
         current_surface = None
 
+# Calculate model height and scale
+raw_model_height = get_model_height(PLAYER_MODEL_PATH)
+player_scale = 1.0
+scaled_height = raw_model_height * player_scale
+
+# Local player controller
+player = FirstPersonController(
+    position=(0, scaled_height / 2 + 0.1, 0),
+    collider='box',
+)
+player.gravity = 1
+player.height = scaled_height
+
+# Attach visual model manually
+player_model = Entity(
+    parent=player,
+    model=PLAYER_MODEL_PATH,
+    texture=PLAYER_TEXTURE_PATH,
+    scale=player_scale,
+    position=(0, 0, 0),
+    double_sided=True
+)
+
+# Camera setup using scaled height
+camera.parent = player
+camera.position = (0, scaled_height + 0.2, 0)
+camera.rotation = (0, 0, 0)
+
+# ESC toggles mouse lock
+mouse_locked = True
+mouse.locked = True
+
+def input(key):
+    global mouse_locked
+    if key == 'escape':
+        mouse_locked = not mouse_locked
+        mouse.locked = mouse_locked
+        mouse.visible = not mouse_locked
+
 Sky()
 update_chunks()
 
 threading.Thread(target=update_position, daemon=True).start()
 threading.Thread(target=fetch_players, daemon=True).start()
+threading.Thread(target=fetch_containers, daemon=True).start()
 
 app.run()
