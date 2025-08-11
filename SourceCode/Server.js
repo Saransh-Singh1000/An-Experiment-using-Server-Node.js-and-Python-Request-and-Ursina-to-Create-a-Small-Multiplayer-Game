@@ -1,46 +1,35 @@
 
-
+// Server.js
 
 const http = require('http');
 const PORT = 3000;
 
 let players = {};
 let containers = {}; // { "cx,cz": [ {x,y,z}, ... ] }
+let coins = {};      // { "cx,cz": [ {x,y,z}, ... ] }
 
 const CHUNK_SIZE = 50;
 const CONTAINERS_PER_CHUNK = 5;
+const COINS_PER_CHUNK = 1;  
 const MIN_DISTANCE = 5;
 
-// Generate spaced container positions for a chunk
-function generateContainersForChunk(cx, cz) {
+// Generate spaced positions (for containers or coins)
+function generatePositionsForChunk(cx, cz, count, yValue) {
   const positions = [];
   let tries = 0;
-  const maxTries = 100;
-
-  while (positions.length < CONTAINERS_PER_CHUNK && tries < maxTries) {
+  while (positions.length < count && tries < 100) {
     const x = (cx * CHUNK_SIZE) + Math.random() * CHUNK_SIZE;
     const z = (cz * CHUNK_SIZE) + Math.random() * CHUNK_SIZE;
-    let tooClose = false;
-
-    for (const pos of positions) {
-      const dist = Math.sqrt((x - pos.x) ** 2 + (z - pos.z) ** 2);
-      if (dist < MIN_DISTANCE) {
-        tooClose = true;
-        break;
-      }
-    }
-
-    if (!tooClose) {
-      positions.push({ x, y: 0.5, z });
+    if (!positions.some(pos => Math.hypot(x - pos.x, z - pos.z) < MIN_DISTANCE)) {
+      positions.push({ x, y: yValue, z });
     }
     tries++;
   }
-
   return positions;
 }
 
-// Periodically generate containers for chunks around players
-function updateContainers() {
+// Periodically generate containers & coins for chunks around players
+function updateEntities() {
   const activeChunks = new Set();
 
   for (const id in players) {
@@ -58,14 +47,18 @@ function updateContainers() {
   activeChunks.forEach(key => {
     if (!containers[key]) {
       const [cx, cz] = key.split(',').map(Number);
-      containers[key] = generateContainersForChunk(cx, cz);
+      containers[key] = generatePositionsForChunk(cx, cz, CONTAINERS_PER_CHUNK, 0.5);
+    }
+    if (!coins[key]) {
+      const [cx, cz] = key.split(',').map(Number);
+      coins[key] = generatePositionsForChunk(cx, cz, COINS_PER_CHUNK, 1);
     }
   });
 }
 
-setInterval(updateContainers, 5000);
+setInterval(updateEntities, 5000);
 
-// Clean up disconnected players every 5 seconds
+// Clean up disconnected players
 setInterval(() => {
   const now = Date.now();
   for (const id in players) {
@@ -82,8 +75,6 @@ const server = http.createServer((req, res) => {
     req.on('end', () => {
       try {
         const data = JSON.parse(body);
-
-        // Use client-sent ID
         const id = typeof data.id === 'string' ? data.id : req.socket.remoteAddress.replace(/^.*:/, '');
 
         players[id] = {
@@ -95,31 +86,31 @@ const server = http.createServer((req, res) => {
 
         res.writeHead(200);
         res.end('Position Updated');
-      } catch (e) {
+      } catch {
         res.writeHead(400);
         res.end('Invalid JSON');
       }
     });
-  } else if (req.method === 'GET') {
+  } 
+  else if (req.method === 'GET') {
     if (req.url === '/containers') {
-      // Return all container positions
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify(containers));
-    } else {
-      // Return player positions
+    }
+    else if (req.url === '/coins') {
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify(coins));
+    }
+    else {
       const result = {};
       for (const id in players) {
-        result[id] = {
-          x: players[id].x,
-          y: players[id].y,
-          z: players[id].z
-        };
+        result[id] = { x: players[id].x, y: players[id].y, z: players[id].z };
       }
-
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify(result));
     }
-  } else {
+  } 
+  else {
     res.writeHead(405);
     res.end('Method Not Allowed');
   }
