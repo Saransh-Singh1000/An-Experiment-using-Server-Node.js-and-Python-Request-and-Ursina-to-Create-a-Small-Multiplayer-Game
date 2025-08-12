@@ -1,6 +1,4 @@
 
-
-# Client.py (Ultra-Optimized with Rotating Coins and Colliders)
 from ursina import *
 from ursina.prefabs.first_person_controller import FirstPersonController
 import asyncio
@@ -31,7 +29,6 @@ COIN_LOD_DISTANCE = 80            # beyond this, coins scale down / freeze
 # === URSINA APP ===
 app = Ursina()
 
-
 # === IDs & State ===
 my_id = str(uuid.uuid4())
 other_players = {}
@@ -44,14 +41,16 @@ chunk_coins = {}                  # (cx,cz) -> deque[Entity]
 box_pools = {}                    # (cx,cz) -> deque (recycled boxes)
 coin_pools = {}                  # (cx,cz) -> deque (recycled coins)
 containers_cache = {}             # server cache of container positions (raw)
-coins_cache = {}                  # server cache of coin positions (raw)
+coins_cache = {}                 # server cache of coin positions (raw)
+
+# For tracking coins globally for click detection
+all_coins_entities = set()
 
 # === Utility Helpers ===
 def chunk_key(x, z):
     return (math.floor(x / CHUNK_SIZE), math.floor(z / CHUNK_SIZE))
 
 def world_to_chunk_indices_array(xs, zs):
-    # vectorized chunk indices for arrays of x,z
     cx = np.floor(np.array(xs) / CHUNK_SIZE).astype(int)
     cz = np.floor(np.array(zs) / CHUNK_SIZE).astype(int)
     return np.vstack((cx, cz)).T
@@ -59,13 +58,18 @@ def world_to_chunk_indices_array(xs, zs):
 # === Minimal per-frame work: only chunk keep/evict, coin rotation, and sound ===
 current_surface = None
 
+collected_coins_count = 0
+coins_text = Text(text=f"Coins Collected: {collected_coins_count}", position=window.top_right - Vec2(0.3,0.1), origin=(1,1), scale=2)
+
+coin_collect_sound = Audio('Assets/CoinCollect.mp3', autoplay=False)
+
 def update():
     global current_surface
+
     # camera vertical control
     camera.rotation_x -= mouse.velocity[1] * 40
     camera.rotation_x = clamp(camera.rotation_x, -90, 90)
 
-    # update chunks only when player moves across chunk boundary to reduce work
     update_chunks_if_needed()
 
     # Rotate all visible coins smoothly
@@ -78,7 +82,6 @@ def update():
     surface_type = getattr(hit.entity, 'surface_type', None) if hit.hit else None
     is_moving = (held_keys['w'] or held_keys['a'] or held_keys['s'] or held_keys['d']) and player.grounded
 
-    # quick sound logic (unchanged)
     if is_moving:
         if surface_type != current_surface:
             if current_surface == 'grass':
@@ -103,20 +106,17 @@ def update_chunks_if_needed():
     if center == _last_chunk_center:
         return
     _last_chunk_center = center
-    # build visible chunk set
     visible = {(cx + dx, cz + dz) for dx in range(-VIEW_RADIUS, VIEW_RADIUS+1) for dz in range(-VIEW_RADIUS, VIEW_RADIUS+1)}
 
-    # create new chunks
     for key in visible:
         if key not in active_chunks:
             active_chunks[key] = create_chunk(key[0], key[1])
 
-    # unload far chunks
     for key in list(active_chunks.keys()):
         if key not in visible:
             destroy(active_chunks[key])
             del active_chunks[key]
-            # recycle chunk objects
+
             if key in chunk_boxes:
                 for ent in chunk_boxes[key]:
                     recycle_box_to_pool(key, ent)
@@ -160,6 +160,8 @@ def recycle_box_to_pool(key, ent):
 def recycle_coin_to_pool(key, ent):
     ensure_pool_for(key)
     ent.disable()
+    if ent in all_coins_entities:
+        all_coins_entities.remove(ent)
     if len(coin_pools[key]) < MAX_POOL_PER_CHUNK:
         coin_pools[key].append(ent)
     else:
@@ -182,7 +184,6 @@ def create_chunk(cx, cz):
 
 # === Entity creation with pooling ===
 def spawn_container_entity(key, pos):
-    # try pool
     ent = get_box_from_pool(key)
     if ent is None:
         ent = Entity(model='cube', texture=BOX_TEXTURE_PATH, scale=(4,2,3), collider='box', color=color.white, double_sided=True)
@@ -198,48 +199,74 @@ def spawn_coin_entity(key, pos):
             model=COIN_MODEL_PATH,
             texture=COIN_TEXTURE_PATH,
             scale=1,
-            collider='box',   # Added box collider
+            collider='box',
             double_sided=True
         )
     ent.position = (pos['x'], pos['y'], pos['z'])
     ent.enable()
+    all_coins_entities.add(ent)
     return ent
+
+# === Coin collection function ===
+
+
+def collect_coin_entity(ent):
+    global collected_coins_count
+    ent.disable()
+    if ent in all_coins_entities:
+        all_coins_entities.remove(ent)
+
+    collected_coins_count += 1
+    coins_text.text = f"Coins Collected: {collected_coins_count}"
+    coin_collect_sound.play()
+
+    # Notify server in background event loop
+    asyncio.run_coroutine_threadsafe(notify_server(ent), async_loop)
+
+async def notify_server(ent):
+    async with aiohttp.ClientSession() as session:
+        try:
+            payload = {'x': ent.x, 'y': ent.y, 'z': ent.z}
+            await session.post(f'{SERVER_URL}/remove_coin', json=payload)
+        except Exception as e:
+            print("Error notifying server of coin removal:", e)
+
+# === Input handler for clicks ===
+def input(key):
+    if key == 'left mouse down' or key == 'right mouse down':
+        hit_entity = mouse.hovered_entity
+        if hit_entity and hit_entity in all_coins_entities:
+            collect_coin_entity(hit_entity)
 
 # === Async networking (aiohttp) running in background thread ===
 async def network_loop():
     timeout = aiohttp.ClientTimeout(total=5.0)
     async with aiohttp.ClientSession(timeout=timeout) as session:
-        # schedule repeated tasks
         last_world_fetch = 0.0
         last_players_fetch = 0.0
         last_send = 0.0
         while True:
             now = time.time()
 
-            # send my position (batched, lower-overhead)
             if now - last_send >= PLAYER_UPDATE_INTERVAL:
                 last_send = now
                 payload = {'id': my_id, 'x': round(player.x,2), 'y': round(player.y,2), 'z': round(player.z,2)}
                 asyncio.create_task(post_position(session, payload))
 
-            # fetch other players more frequently (positions are small)
             if now - last_players_fetch >= PLAYERS_FETCH_INTERVAL:
                 last_players_fetch = now
                 asyncio.create_task(fetch_players(session))
 
-            # fetch world data (containers + coins) less frequently and in batch
             if now - last_world_fetch >= WORLD_FETCH_INTERVAL:
                 last_world_fetch = now
-                # parallel fetch
                 asyncio.create_task(fetch_world(session))
 
-            await asyncio.sleep(0.06)  # small sleep to yield to the loop
+            await asyncio.sleep(0.06)
 
 async def post_position(session, payload):
     try:
         await session.post(SERVER_URL, json=payload)
     except Exception as e:
-        # ignore transient errors but print once in a while
         if int(time.time()) % 10 == 0:
             print('Post pos error:', e)
 
@@ -248,53 +275,44 @@ async def fetch_players(session):
         async with session.get(SERVER_URL) as resp:
             if resp.status == 200:
                 data = await resp.json()
-                # quickly update other_players dict in thread-safe manner
                 with players_lock:
-                    # we will only keep remote players within visible radius (coarse culling)
                     pxs, pzs, ids = [], [], []
                     for pid, p in data.items():
-                        if pid == my_id: continue
-                        pxs.append(p['x']); pzs.append(p['z']); ids.append(pid)
-                    if pxs:
-                        arr = np.vstack((pxs, pzs)).T
-                    else:
-                        arr = np.empty((0,2))
-                    # update other_players with minimal work in main thread via function-call
+                        if pid == my_id:
+                            continue
+                        pxs.append(p['x'])
+                        pzs.append(p['z'])
+                        ids.append(pid)
                     invoke_on_main_thread(lambda: update_other_players(ids, pxs, pzs))
     except Exception as e:
         if int(time.time()) % 10 == 0:
             print('Fetch players error:', e)
 
 def update_other_players(ids, xs, zs):
-    # invoked in main thread via ursina's invoke or direct call
     cx, cz = chunk_key(player.x, player.z)
     for idx, pid in enumerate(ids):
         px, pz = xs[idx], zs[idx]
         pcx, pcz = chunk_key(px, pz)
         if abs(pcx - cx) <= VIEW_RADIUS and abs(pcz - cz) <= VIEW_RADIUS:
-            adjusted_y = 0.0 + 0.1  # server y may be small; we avoid heavy get_model_height calls here
+            adjusted_y = get_entity_height(PLAYER_MODEL_PATH) * player_scale / 2 + 0.1
             if pid not in other_players:
-                other_players[pid] = Entity(model=PLAYER_MODEL_PATH, texture=PLAYER_TEXTURE_PATH, scale=1.0,
+                other_players[pid] = Entity(model=PLAYER_MODEL_PATH, texture=PLAYER_TEXTURE_PATH, scale=player_scale,
                                            position=(px, adjusted_y, pz), collider='box', double_sided=True)
             else:
                 p = other_players[pid]
                 p.x, p.y, p.z = px, adjusted_y, pz
-    # remove far players
     for pid in list(other_players.keys()):
-        # if player vanished server-side or moved far
         if pid not in ids:
-            destroy(other_players[pid]); del other_players[pid]
+            destroy(other_players[pid])
+            del other_players[pid]
 
 async def fetch_world(session):
     try:
-        # parallel GET for containers and coins
         async with session.get(f'{SERVER_URL}/containers') as rc:
             containers_data = await rc.json() if rc.status == 200 else {}
         async with session.get(f'{SERVER_URL}/coins') as rco:
             coins_data = await rco.json() if rco.status == 200 else {}
 
-        # store caches (cheap copy)
-        # convert keys to tuple ints for quick comparisons
         new_containers = {}
         for k, v in containers_data.items():
             new_containers[tuple(map(int, k.split(',')))] = v
@@ -302,14 +320,12 @@ async def fetch_world(session):
         for k, v in coins_data.items():
             new_coins[tuple(map(int, k.split(',')))] = v
 
-        # apply to main thread
         invoke_on_main_thread(lambda: apply_world_updates(new_containers, new_coins))
     except Exception as e:
         if int(time.time()) % 10 == 0:
             print('Fetch world error:', e)
 
 def apply_world_updates(containers_dict, coins_dict):
-    # caches for future diffs
     global containers_cache, coins_cache
     containers_cache = containers_dict
     coins_cache = coins_dict
@@ -317,87 +333,69 @@ def apply_world_updates(containers_dict, coins_dict):
     cx, cz = chunk_key(player.x, player.z)
     visible_chunks = {(cx + dx, cz + dz) for dx in range(-VIEW_RADIUS, VIEW_RADIUS+1) for dz in range(-VIEW_RADIUS, VIEW_RADIUS+1)}
 
-    # spawn containers for visible chunks
+    # Containers
     for ck in visible_chunks:
-        # containers
         if ck in containers_cache and ck not in chunk_boxes:
             positions = containers_cache[ck]
             chunk_boxes[ck] = deque()
             ensure_pool_for(ck)
             for pos in positions:
-                ent = get_box_from_pool(ck)
-                if ent is None:
-                    ent = Entity(model='cube', texture=BOX_TEXTURE_PATH, scale=(4,2,3), collider='box', double_sided=True)
-                    ent.surface_type = 'metal'
-                ent.position = (pos['x'], pos['y'], pos['z'])
-                ent.enable()
+                ent = spawn_container_entity(ck, pos)
                 chunk_boxes[ck].append(ent)
-        # coins
+
+    # Coins
+    for ck in visible_chunks:
         if ck in coins_cache and ck not in chunk_coins:
             positions = coins_cache[ck]
             chunk_coins[ck] = deque()
             ensure_pool_for(ck)
             for pos in positions:
-                ent = get_coin_from_pool(ck)
-                if ent is None:
-                    ent = Entity(model=COIN_MODEL_PATH, texture=COIN_TEXTURE_PATH, scale=1, collider='box', double_sided=True)
-                ent.position = (pos['x'], pos['y'], pos['z'])
-                ent.enable()
+                ent = spawn_coin_entity(ck, pos)
                 chunk_coins[ck].append(ent)
 
-    # remove chunks that are not visible (we already handle removal in update_chunks_if_needed)
-    # but also ensure we recycle any chunk entities that might remain
-    # (this is defensive -- most cleanup is handled on chunk unload)
+    # Cleanup chunks no longer visible
     for ck in list(chunk_boxes.keys()):
         if ck not in visible_chunks:
             for ent in chunk_boxes[ck]:
                 recycle_box_to_pool(ck, ent)
             del chunk_boxes[ck]
+
     for ck in list(chunk_coins.keys()):
         if ck not in visible_chunks:
             for ent in chunk_coins[ck]:
                 recycle_coin_to_pool(ck, ent)
             del chunk_coins[ck]
 
-# === small utility to safely call from async to main thread ===
 def invoke_on_main_thread(fn, *args, **kwargs):
-    # Ursina's invoke executes in the main thread after delay=0
     invoke(fn, *args, delay=0)
 
-# === Player setup (kept similar to before but minimal height calc) ===
-def get_model_height(path):
-    temp = Entity(model=path)
+def get_entity_height(model_path):
+    temp = Entity(model=model_path)
     h = temp.bounds.size.y
     destroy(temp)
     return h
 
-raw_model_height = get_model_height(PLAYER_MODEL_PATH)
+raw_model_height = get_entity_height(PLAYER_MODEL_PATH)
 player_scale = 1.0
 scaled_height = raw_model_height * player_scale
 
-player = FirstPersonController(position=(0, scaled_height/2 + 0.1, 0), collider='box')
-player.gravity = 1
-player.height = scaled_height
+player = FirstPersonController(model=PLAYER_MODEL_PATH, texture=PLAYER_TEXTURE_PATH, scale=player_scale, collider = 'box')
+player.y = scaled_height / 2
+player.cursor.visible = True
+player.gravity = 4
+player.jump_height = 2
+player.speed = 8
 
-player_model = Entity(parent=player, model=PLAYER_MODEL_PATH, texture=PLAYER_TEXTURE_PATH, scale=player_scale)
-camera.parent = player
-camera.position = (0, scaled_height + 0.2, 0)
-mouse.locked = True
+grass_sound = Audio('Assets/WalkingOnGrass.mp3', loop=True, autoplay=False)
+metal_sound = Audio('Assets/WalkingOnMetal.mp3', loop=True, autoplay=False)
 
-# === Sound (unchanged minimal) ===
-grass_sound = Audio('Assets/WalkingOnGrass.mp3', loop=True, autoplay=False, volume=0.9)
-metal_sound = Audio('Assets/WalkingOnMetal.mp3', loop=True, autoplay=False, volume=0.9)
-
-# === Start async networking in background thread ===
-def start_async_loop():
-    loop = asyncio.new_event_loop()
+# Start background networking loop
+def start_async_loop(loop):
     asyncio.set_event_loop(loop)
     loop.run_until_complete(network_loop())
 
-threading.Thread(target=start_async_loop, daemon=True).start()
-
-# initial chunk load
-update_chunks_if_needed()
+async_loop = asyncio.new_event_loop()
+threading.Thread(target=start_async_loop, args=(async_loop,), daemon=True).start()
 
 Sky()
 

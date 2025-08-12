@@ -1,5 +1,7 @@
 
-// Server.js
+
+
+
 
 const http = require('http');
 const PORT = 3000;
@@ -77,6 +79,29 @@ const server = http.createServer((req, res) => {
         const data = JSON.parse(body);
         const id = typeof data.id === 'string' ? data.id : req.socket.remoteAddress.replace(/^.*:/, '');
 
+        if (req.url === '/collect-coin') {
+          // data: { position: {x,y,z} }
+          const pos = data.position;
+          if (!pos || typeof pos.x !== 'number' || typeof pos.z !== 'number') {
+            res.writeHead(400);
+            return res.end('Invalid position');
+          }
+          // Find the chunk key
+          const cx = Math.floor(pos.x / CHUNK_SIZE);
+          const cz = Math.floor(pos.z / CHUNK_SIZE);
+          const key = `${cx},${cz}`;
+          if (coins[key]) {
+            // Remove coin from coins[key] list by matching position with some tolerance
+            coins[key] = coins[key].filter(c => {
+              return !(Math.abs(c.x - pos.x) < 0.1 && Math.abs(c.y - pos.y) < 0.1 && Math.abs(c.z - pos.z) < 0.1);
+            });
+          }
+          res.writeHead(200);
+          res.end('Coin collected');
+          return;
+        }
+
+        // Normal player position update
         players[id] = {
           x: data.x,
           y: data.y,
